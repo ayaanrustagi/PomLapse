@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface-container-low: #f2f4f6;
+  --color-on-primary: #ffffff;
+  --color-error-container: #ffdad6;
+  --color-secondary-fixed-dim: #b7c8e1;
+  --color-on-secondary-fixed-variant: #38485d;
+  --color-primary-fixed-dim: #bec6e0;
+  --color-surface-container-high: #e6e8ea;
+  --color-on-secondary-container: #54647a;
+  --color-inverse-surface: #2d3133;
+  --color-primary-container: #21283c;
+  --color-tertiary-fixed-dim: #3cddc7;
+  --color-outline: #75777d;
+  --color-on-primary-container: #888fa7;
+  --color-on-tertiary: #ffffff;
+  --color-tertiary-fixed: #62fae3;
+  --color-surface-container-lowest: #ffffff;
+  --color-on-tertiary-fixed: #00201c;
+  --color-primary-fixed: #dae2fd;
+  --color-tertiary: #001815;
+  --color-inverse-primary: #bec6e0;
+  --color-surface: #f7f9fb;
+  --color-outline-variant: #c5c6cd;
+  --color-on-error: #ffffff;
+  --color-secondary-container: #d0e1fb;
+  --color-background: #f7f9fb;
+  --color-secondary-fixed: #d3e4fe;
+  --color-surface-container-highest: #e0e3e5;
+  --color-on-tertiary-container: #00a291;
+  --color-error: #ba1a1a;
+  --color-tertiary-container: #002f29;
+  --color-surface-dim: #d8dadc;
+  --color-surface-container: #eceef0;
+  --color-on-primary-fixed-variant: #3f465c;
+  --color-secondary: #505f76;
+  --color-on-primary-fixed: #131b2e;
+  --color-inverse-on-surface: #eff1f3;
+  --color-on-tertiary-fixed-variant: #005047;
+  --color-on-error-container: #93000a;
+  --color-on-surface: #191c1e;
+  --color-on-secondary-fixed: #0b1c30;
+  --color-surface-variant: #e0e3e5;
+  --color-on-background: #191c1e;
+  --color-on-secondary: #ffffff;
+  --color-surface-bright: #f7f9fb;
+  --color-primary: #0c1427;
+  --color-on-surface-variant: #45474c;
+  --color-surface-tint: #565e74;
+
+  --font-headline: "Manrope", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-label: "Inter", sans-serif;
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .custom-range::-webkit-slider-runnable-track {
+    background: var(--color-surface-container-high);
+    height: 4px;
+    border-radius: 2px;
+  }
+  .custom-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    margin-top: -6px;
+    height: 16px;
+    width: 16px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    border: 2px solid var(--color-tertiary-fixed);
+  }
+}

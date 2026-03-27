@@ -1,0 +1,5 @@
+{
+  "name": "Timelapse Recorder",
+  "description": "Record timelapse videos directly from your webcam.",
+  "requestFramePermissions": ["camera"]
+}
