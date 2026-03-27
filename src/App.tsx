@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Camera, StopCircle, Play, Settings, Download, Video, RefreshCw, AlertCircle, Clock, Film, ZoomIn, Timer, History, BarChart2, HelpCircle, Bell } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Camera, StopCircle, Play, Settings, Download, Video, AlertCircle, Clock, Eye, Activity, RotateCcw, Volume2, RefreshCw, Timer } from 'lucide-react';
 import { Muxer, ArrayBufferTarget } from 'webm-muxer';
 import { cn } from './lib/utils';
 
@@ -10,41 +10,47 @@ export default function App() {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [isRecording, setIsRecording] = useState(false);
-  const [intervalMs, setIntervalMs] = useState(1000);
-  const [outputFps, setOutputFps] = useState(30);
-  const [frameCount, setFrameCount] = useState(0);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  type SessionState = 'idle' | 'running' | 'recap';
+  const [sessionState, setSessionState] = useState<SessionState>('idle');
   
-  const [zoom, setZoom] = useState(1);
-  const [pinchStartDist, setPinchStartDist] = useState<number | null>(null);
-  const [pinchStartZoom, setPinchStartZoom] = useState(1);
+  const POMODORO_TIME = 25 * 60; // 25 minutes
+  const [timeLeft, setTimeLeft] = useState(POMODORO_TIME);
+  const [shameScore, setShameScore] = useState(0);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   
-  const encoderRef = useRef<any>(null); // Using any to avoid TS errors if VideoEncoder is not typed
+  const encoderRef = useRef<any>(null); 
   const muxerRef = useRef<any>(null);
-  const timerRef = useRef<number | null>(null);
+  const captureTimerRef = useRef<number | null>(null);
+  const pomodoroTimerRef = useRef<number | null>(null);
   const currentFrameRef = useRef(0);
-  const zoomRef = useRef(1);
 
-  useEffect(() => {
-    zoomRef.current = zoom;
-  }, [zoom]);
+  // Constants for timelapse
+  const intervalMs = 1000; // 1 frame per second
+  const outputFps = 30;
 
+  // Initialize camera and permissions
   useEffect(() => {
     if (!('VideoEncoder' in window)) {
       setIsSupported(false);
       return;
     }
 
-    navigator.mediaDevices.enumerateDevices()
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(initialStream => {
+        initialStream.getTracks().forEach(t => t.stop());
+        return navigator.mediaDevices.enumerateDevices();
+      })
       .then(devs => {
         const videoDevices = devs.filter(d => d.kind === 'videoinput');
         setDevices(videoDevices);
         if (videoDevices.length > 0) {
-          setSelectedDeviceId(videoDevices[0].deviceId);
+          setSelectedDeviceId(videoDevices[0].deviceId || 'default');
+        } else {
+          setSelectedDeviceId('default');
         }
       })
       .catch(err => {
@@ -53,18 +59,21 @@ export default function App() {
       });
   }, []);
 
+  // Update stream when device changes
   useEffect(() => {
     if (!selectedDeviceId || !isSupported) return;
     
     let activeStream: MediaStream | null = null;
     
-    navigator.mediaDevices.getUserMedia({
-      video: { 
-        deviceId: selectedDeviceId,
-        width: { ideal: 1920 },
-        height: { ideal: 1080 }
-      }
-    })
+    const videoConstraints: MediaTrackConstraints = {
+      width: { ideal: 1920 },
+      height: { ideal: 1080 }
+    };
+    if (selectedDeviceId !== 'default') {
+      videoConstraints.deviceId = selectedDeviceId;
+    }
+
+    navigator.mediaDevices.getUserMedia({ video: videoConstraints })
     .then(s => {
       activeStream = s;
       setStream(s);
@@ -85,10 +94,47 @@ export default function App() {
     };
   }, [selectedDeviceId, isSupported]);
 
-  const startRecording = async () => {
+  // Shame Score Logic
+  useEffect(() => {
+    let shameInterval: number;
+    let visibilityListener: () => void;
+
+    if (sessionState === 'running') {
+      shameInterval = window.setInterval(() => {
+        if (document.hidden) {
+          // HUGE penalty for tabbing away
+          setShameScore(s => s + 25);
+        } else {
+          // Increments randomly as you work, representing the inevitable build-up of shame
+          if (Math.random() < 0.2) setShameScore(s => s + 1);
+        }
+      }, 1000);
+
+      visibilityListener = () => {
+        if (document.hidden) {
+          setShameScore(s => s + 50); // Immediate penalty for switching tabs!
+        }
+      };
+      document.addEventListener('visibilitychange', visibilityListener);
+    }
+
+    return () => {
+      if (shameInterval) clearInterval(shameInterval);
+      if (visibilityListener) document.removeEventListener('visibilitychange', visibilityListener);
+    };
+  }, [sessionState]);
+
+  const startSession = async () => {
     if (!videoRef.current || !stream) {
       setError("Camera not ready.");
       return;
+    }
+
+    // Play lofi stream
+    if (audioRef.current) {
+      audioRef.current.loop = true;
+      audioRef.current.volume = 0.4;
+      audioRef.current.play().catch(e => console.warn("Audio playback prevented:", e));
     }
 
     try {
@@ -104,12 +150,7 @@ export default function App() {
 
       muxerRef.current = new Muxer({
         target: new ArrayBufferTarget(),
-        video: {
-          codec: 'V_VP9',
-          width,
-          height,
-          frameRate: outputFps
-        }
+        video: { codec: 'V_VP9', width, height, frameRate: outputFps }
       });
 
       // @ts-ignore
@@ -118,7 +159,7 @@ export default function App() {
         error: (e: any) => {
           console.error("VideoEncoder error:", e);
           setError(`Encoding error: ${e.message}`);
-          stopRecording();
+          stopSession();
         }
       });
 
@@ -129,8 +170,9 @@ export default function App() {
         bitrate: 5_000_000,
       });
 
-      setIsRecording(true);
-      setFrameCount(0);
+      setSessionState('running');
+      setTimeLeft(POMODORO_TIME);
+      setShameScore(0);
       currentFrameRef.current = 0;
       setVideoUrl(null);
       setError(null);
@@ -145,15 +187,9 @@ export default function App() {
         const vh = videoRef.current.videoHeight;
         if (!vw || !vh) return;
 
-        const currentZoom = zoomRef.current;
-        const sWidth = vw / currentZoom;
-        const sHeight = vh / currentZoom;
-        const sx = (vw - sWidth) / 2;
-        const sy = (vh - sHeight) / 2;
-
         ctx.fillStyle = 'black';
         ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(videoRef.current, sx, sy, sWidth, sHeight, 0, 0, width, height);
+        ctx.drawImage(videoRef.current, 0, 0, vw, vh, 0, 0, width, height);
         
         const timestamp = (currentFrameRef.current * 1000000) / outputFps;
         
@@ -164,31 +200,45 @@ export default function App() {
           
           encoderRef.current.encode(frame, { keyFrame: isKeyFrame });
           frame.close();
-          
           currentFrameRef.current++;
-          setFrameCount(currentFrameRef.current);
         } catch (err) {
           console.error("Error capturing frame:", err);
         }
       };
 
-      captureFrame();
-      timerRef.current = window.setInterval(captureFrame, intervalMs);
+      captureFrame(); // Capture first frame immediately
+      captureTimerRef.current = window.setInterval(captureFrame, intervalMs);
+      
+      pomodoroTimerRef.current = window.setInterval(() => {
+        setTimeLeft(prev => {
+          if (prev <= 1) {
+            stopSession();
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
       
     } catch (err: any) {
-      console.error("Failed to start recording:", err);
-      setError(`Failed to start recording: ${err.message}`);
-      setIsRecording(false);
+      console.error("Failed to start session:", err);
+      setError(`Failed to start session: ${err.message}`);
+      setSessionState('idle');
     }
   };
 
-  const stopRecording = async () => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
+  const stopSession = async () => {
+    if (captureTimerRef.current) {
+      clearInterval(captureTimerRef.current);
+      captureTimerRef.current = null;
+    }
+    if (pomodoroTimerRef.current) {
+      clearInterval(pomodoroTimerRef.current);
+      pomodoroTimerRef.current = null;
     }
 
-    setIsRecording(false);
+    if (audioRef.current) {
+      audioRef.current.pause();
+    }
 
     try {
       if (encoderRef.current && muxerRef.current) {
@@ -208,14 +258,17 @@ export default function App() {
       console.error("Error finalizing video:", err);
       setError(`Error finalizing video: ${err.message}`);
     }
+
+    setSessionState('recap');
   };
 
-  const formatDuration = (frames: number, fps: number) => {
-    const totalSeconds = frames / fps;
-    const mins = Math.floor(totalSeconds / 60);
-    const secs = Math.floor(totalSeconds % 60);
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  const formatTime = (secs: number) => {
+    const mins = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${mins.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
+
+  const currentFocusScore = Math.max(0, 100 - Math.floor(shameScore / 10));
 
   if (!isSupported) {
     return (
@@ -223,384 +276,255 @@ export default function App() {
         <div className="max-w-md text-center space-y-4">
           <AlertCircle className="w-12 h-12 text-error mx-auto" />
           <h1 className="text-2xl font-bold font-headline">Browser Not Supported</h1>
-          <p className="text-on-surface-variant">
-            Your browser does not support the WebCodecs API required for this application.
-            Please use a recent version of Chrome, Edge, or Safari.
-          </p>
+          <p className="text-on-surface-variant">Your browser does not support the required WebCodecs API.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (sessionState === 'recap') {
+    return (
+      <div className="min-h-screen bg-inverse-surface text-inverse-on-surface font-body p-8 flex flex-col items-center justify-center overflow-y-auto pattern-bg">
+        <div className="max-w-6xl w-full">
+          <div className="text-center mb-12">
+            <h1 className="text-5xl font-black font-headline text-tertiary-fixed mb-4">Session Recap</h1>
+            <p className="text-xl text-inverse-primary tracking-wide">Here is what happened while you were "studying".</p>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
+            {/* Timelapse Video */}
+            <div className="bg-surface-container-lowest p-4 rounded-3xl shadow-2xl relative">
+              <span className="absolute -top-4 -left-4 bg-tertiary-fixed text-on-tertiary-fixed px-4 py-1 rounded-full text-xs font-bold uppercase tracking-widest shadow-lg">Evidence</span>
+              {videoUrl ? (
+                <div className="w-full aspect-video rounded-2xl overflow-hidden bg-black flex items-center justify-center relative group">
+                  <video src={videoUrl} controls autoPlay loop className="w-full h-full object-contain" />
+                  <a
+                    href={videoUrl}
+                    download={`pomlapse-${new Date().getTime()}.webm`}
+                    className="absolute top-4 right-4 bg-black/60 backdrop-blur-md text-white p-3 rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-black/80"
+                    title="Download Timelapse"
+                  >
+                    <Download className="w-5 h-5" />
+                  </a>
+                </div>
+              ) : (
+                <div className="w-full aspect-video rounded-2xl bg-surface-container-high flex flex-col items-center justify-center">
+                  <RefreshCw className="w-12 h-12 text-on-surface-variant animate-spin mb-4" />
+                  <p className="text-on-surface-variant font-headline">Compiling video evidence...</p>
+                </div>
+              )}
+            </div>
+
+            {/* Stats */}
+            <div className="space-y-8">
+              <div className="bg-surface-container-low p-8 rounded-3xl shadow-xl border-l-8 border-primary relative overflow-hidden">
+                <div className="absolute top-[-20%] right-[-10%] opacity-5">
+                  <Activity className="w-64 h-64" />
+                </div>
+                <h3 className="text-sm font-bold uppercase tracking-widest text-on-surface-variant mb-2">Focus Score</h3>
+                <div className="flex items-baseline gap-4">
+                  <span className={cn("text-8xl font-black font-headline", currentFocusScore > 70 ? "text-primary" : "text-error")}>
+                    {currentFocusScore}
+                  </span>
+                  <span className="text-2xl text-on-surface-variant font-headline font-light">/ 100</span>
+                </div>
+                <p className="mt-4 text-on-surface-variant">
+                  {currentFocusScore > 90 ? "Incredible focus." : currentFocusScore > 70 ? "Good job, but you can do better." : "You were heavily distracted. Try again."}
+                </p>
+              </div>
+
+              <div className="bg-error-container text-on-error-container p-8 rounded-3xl shadow-xl relative overflow-hidden">
+                <div className="absolute top-[-20%] right-[-10%] opacity-10">
+                  <Eye className="w-64 h-64" />
+                </div>
+                <h3 className="text-sm font-bold uppercase tracking-widest text-on-error-container/80 mb-2">Accumulated Shame</h3>
+                <span className="text-7xl font-black font-headline">
+                  {shameScore}
+                </span>
+                <p className="mt-4 text-sm font-medium">Incremented when you lose window focus or look away.</p>
+              </div>
+
+              <button 
+                onClick={() => {
+                  setTimeLeft(POMODORO_TIME);
+                  setShameScore(0);
+                  setSessionState('idle');
+                }}
+                className="w-full py-6 bg-tertiary-fixed text-on-tertiary-fixed rounded-2xl font-black font-headline text-xl uppercase tracking-widest hover:scale-[1.02] transition-transform shadow-[0_0_40px_rgba(98,250,227,0.3)] active:scale-95 flex items-center justify-center gap-3"
+              >
+                <RotateCcw className="w-6 h-6" /> Restore Honor (Start over)
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-surface font-body text-on-surface antialiased flex">
-      {/* SideNavBar */}
-      <aside className="h-screen w-64 fixed left-0 top-0 z-50 bg-primary-container flex flex-col py-10 hidden md:flex">
-        <div className="px-8 mb-8">
-          <h1 className="text-xl font-black text-tertiary-fixed font-headline tracking-tighter">Timelapse</h1>
-        </div>
-        
-        <nav className="flex-1 space-y-1">
-          <a href="#" className="flex items-center gap-4 text-tertiary-fixed font-semibold bg-surface-container-low/5 rounded-l-none rounded-r-full py-3 px-8 border-l-4 border-tertiary-fixed font-headline tracking-wide transition-all duration-300">
-            <Video className="w-5 h-5" />
-            <span>Recording</span>
-          </a>
-          <a href="#" className="flex items-center gap-4 text-surface-container-low/60 hover:text-white py-3 px-8 transition-all duration-300 font-headline font-light tracking-wide hover:bg-surface-container-low/10">
-            <History className="w-5 h-5" />
-            <span>Gallery</span>
-          </a>
-          <a href="#" className="flex items-center gap-4 text-surface-container-low/60 hover:text-white py-3 px-8 transition-all duration-300 font-headline font-light tracking-wide hover:bg-surface-container-low/10">
-            <Settings className="w-5 h-5" />
-            <span>Settings</span>
-          </a>
-        </nav>
+    <div className="min-h-screen bg-surface font-body text-on-surface antialiased flex flex-col items-center">
+       {/* Background Lofi Audio (Royalty free stream/file) */}
+       <audio ref={audioRef} src="https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3?filename=lofi-study-112191.mp3" preload="auto" />
 
-        <div className="mt-auto px-8">
-          <button 
-            onClick={isRecording ? stopRecording : startRecording}
-            disabled={!stream || !!error}
-            className={cn(
-              "w-full py-3 rounded-md font-headline font-bold text-sm tracking-tight active:scale-95 transition-all duration-150 shadow-lg",
-              isRecording 
-                ? "bg-error text-white shadow-error/20" 
-                : "bg-gradient-to-br from-primary to-primary-container text-tertiary-fixed shadow-primary/10 border border-tertiary-fixed/20 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
-            )}
-          >
-            {isRecording ? 'STOP RECORDING' : 'START RECORDING'}
-          </button>
-          <div className="mt-8">
-            <a href="#" className="flex items-center gap-4 text-surface-container-low/60 hover:text-white py-3 transition-all duration-300 font-headline font-light tracking-wide">
-              <HelpCircle className="w-5 h-5" />
-              <span>Support</span>
-            </a>
+      {/* Header */}
+      <header className="w-full max-w-7xl mx-auto flex justify-between items-center px-8 py-8">
+        <div className="flex items-center gap-3">
+          <div className="bg-primary text-white p-2 rounded-xl">
+            <Timer className="w-6 h-6" />
           </div>
-        </div>
-      </aside>
-
-      {/* Main Content Canvas */}
-      <main className="md:ml-64 flex-1 min-h-screen flex flex-col">
-        {/* TopAppBar */}
-        <header className="w-full sticky top-0 z-40 bg-surface/80 backdrop-blur-md flex justify-between items-center px-6 md:px-12 py-6">
           <div>
-            <h2 className="text-2xl font-bold tracking-tighter text-on-surface font-headline uppercase">Studio</h2>
-            <p className="text-on-surface-variant text-xs mt-1">Capture and compile your timelapse</p>
+            <h1 className="text-3xl font-black tracking-tighter text-on-surface font-headline leading-none">PomLapse</h1>
+            <p className="text-on-surface-variant text-xs mt-1 font-bold uppercase tracking-widest">Focus • Record • Shame</p>
           </div>
-          <div className="flex items-center gap-6">
-            {isRecording && (
-              <div className="flex items-center gap-2 px-4 py-2 bg-error-container rounded-full">
-                <span className="w-2 h-2 rounded-full bg-error animate-pulse"></span>
-                <span className="text-xs font-bold text-on-error-container uppercase tracking-widest">Live</span>
+        </div>
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2 bg-surface-container-high px-4 py-2 rounded-full">
+            <Volume2 className="w-4 h-4 text-primary" />
+            <span className="text-xs font-bold text-primary uppercase tracking-widest">Lofi Beats</span>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content Dashboard */}
+      <main className="flex-1 w-full max-w-7xl mx-auto px-8 pb-12 grid grid-cols-1 lg:grid-cols-12 gap-12">
+        
+        {/* Left Column: Pomodoro & Actions */}
+        <div className="col-span-1 lg:col-span-7 flex flex-col justify-center gap-12">
+          
+          <div className="relative group">
+            <div className={cn(
+              "absolute -inset-1 rounded-[3rem] blur-2xl opacity-40 transition-all duration-1000",
+              sessionState === 'running' ? "bg-error animate-pulse" : "bg-primary"
+            )}></div>
+            <div className="relative bg-surface-container-lowest p-16 rounded-[3rem] shadow-xl text-center border border-outline-variant/10">
+              
+              <div className="absolute top-8 left-0 right-0 flex justify-center">
+                <div className={cn(
+                  "px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-[0.3em]",
+                  sessionState === 'running' ? "bg-error/10 text-error" : "bg-primary/10 text-primary"
+                )}>
+                  {sessionState === 'running' ? '• Surveillance Active' : 'Ready to Focus'}
+                </div>
               </div>
-            )}
-            <div className="flex items-center gap-4">
-              <button className="text-on-surface-variant hover:bg-surface-container-low p-2 rounded-full cursor-pointer transition-colors">
-                <Bell className="w-5 h-5" />
-              </button>
+
+              <div className="text-[9rem] md:text-[12rem] font-headline font-black text-on-surface leading-none tracking-tighter mt-8 tabular-nums">
+                {formatTime(timeLeft)}
+              </div>
+
+              {sessionState === 'running' && (
+                <div className="mt-4 flex flex-col items-center animate-in fade-in slide-in-from-bottom-4 duration-500">
+                  <p className="text-sm font-bold uppercase tracking-widest text-on-surface-variant mb-2">Shame Score</p>
+                  <p className="text-6xl font-black text-error font-headline">{shameScore}</p>
+                  <p className="text-xs text-on-surface-variant mt-2 max-w-xs text-center">
+                    Increments dynamically. Do not switch tabs. Do not lose focus!
+                  </p>
+                </div>
+              )}
+
+              <div className="mt-16 relative z-10">
+                {sessionState === 'idle' ? (
+                  <button 
+                    onClick={startSession}
+                    disabled={!stream || !!error}
+                    className="group relative w-full sm:w-auto px-16 py-6 rounded-full bg-primary text-white font-black font-headline text-xl uppercase tracking-widest transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:hover:scale-100 shadow-[0_20px_40px_-15px_rgba(12,20,39,0.5)] overflow-hidden"
+                  >
+                    <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300"></div>
+                    <span className="relative flex items-center justify-center gap-3">
+                      <Play className="w-6 h-6 fill-current" /> Start Pomodoro
+                    </span>
+                  </button>
+                ) : (
+                  <button 
+                    onClick={stopSession}
+                    className="w-full sm:w-auto px-16 py-6 rounded-full bg-surface-container-highest text-error font-black font-headline text-xl uppercase tracking-widest transition-all hover:bg-error hover:text-white active:scale-95 flex items-center justify-center gap-3 mx-auto"
+                  >
+                    <StopCircle className="w-6 h-6 fill-current" /> Surrender 
+                  </button>
+                )}
+              </div>
             </div>
           </div>
-        </header>
+        </div>
 
-        <div className="px-6 md:px-12 py-8 max-w-7xl mx-auto w-full flex-1 flex flex-col">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start flex-1">
+        {/* Right Column: Live Feed & Settings */}
+        <div className="col-span-1 lg:col-span-5 flex flex-col gap-6">
+          
+          <div className="bg-surface-container-lowest p-5 rounded-3xl shadow-lg border border-outline-variant/10">
+            <div className="flex justify-between items-center mb-4">
+              <div className="flex items-center gap-2">
+                <Camera className="w-4 h-4 text-primary" />
+                <h3 className="font-headline font-bold text-xs uppercase tracking-widest">Watcher Feed</h3>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="relative flex h-2 w-2">
+                  {sessionState === 'running' && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-error opacity-75"></span>}
+                  <span className={cn("relative inline-flex rounded-full h-2 w-2", sessionState === 'running' ? "bg-error" : "bg-primary")}></span>
+                </span>
+                <span className="text-[10px] font-mono text-on-surface-variant font-bold uppercase">{sessionState === 'running' ? 'REC' : 'STANDBY'}</span>
+              </div>
+            </div>
             
-            {/* Left Column: Timer & Preview */}
-            <div className="col-span-1 lg:col-span-8 space-y-8">
+            <div className="aspect-video bg-black rounded-2xl overflow-hidden relative border border-outline-variant/10">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full h-full object-cover transform -scale-x-100"
+              />
+              <canvas ref={canvasRef} className="hidden" />
               
-              {/* The Pulse Timer */}
-              <section className="bg-gradient-to-br from-primary to-primary-container rounded-3xl p-10 md:p-16 text-center relative overflow-hidden group shadow-xl">
-                <div className="absolute -top-24 -left-24 w-64 h-64 bg-tertiary-fixed/5 rounded-full blur-[100px]"></div>
-                <div className="absolute -bottom-24 -right-24 w-64 h-64 bg-tertiary-fixed/5 rounded-full blur-[100px]"></div>
-                
-                <div className="relative z-10 flex flex-col items-center">
-                  <span className="text-tertiary-fixed/40 font-headline font-bold tracking-[0.4em] uppercase text-xs mb-8">
-                    {isRecording ? 'Recording Active' : 'Ready to Record'}
-                  </span>
-                  
-                  <div className="relative inline-block mb-12">
-                    <h2 className="text-7xl md:text-[10rem] font-headline font-extrabold text-white leading-none tracking-tighter">
-                      {formatDuration(frameCount, outputFps)}
-                    </h2>
-                    {isRecording && (
-                      <div className="absolute -right-4 md:-right-12 top-1/2 -translate-y-1/2 flex flex-col gap-2">
-                        <div className="w-1.5 h-1.5 rounded-full bg-tertiary-fixed animate-pulse"></div>
-                        <div className="w-1.5 h-1.5 rounded-full bg-white/20"></div>
-                        <div className="w-1.5 h-1.5 rounded-full bg-white/20"></div>
-                      </div>
-                    )}
-                  </div>
-                  
-                  <div className="flex items-center gap-6">
-                    {!isRecording ? (
-                      <button 
-                        onClick={startRecording}
-                        disabled={!stream || !!error}
-                        className="group relative flex items-center justify-center w-20 h-20 rounded-full bg-tertiary-fixed text-primary transition-all active:scale-95 shadow-[0_0_40px_rgba(98,250,227,0.2)] disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        <Play className="w-8 h-8 ml-1" fill="currentColor" />
-                      </button>
-                    ) : (
-                      <button 
-                        onClick={stopRecording}
-                        className="group relative flex items-center justify-center w-20 h-20 rounded-full bg-error text-white transition-all active:scale-95 shadow-[0_0_40px_rgba(186,26,26,0.2)]"
-                      >
-                        <StopCircle className="w-8 h-8" fill="currentColor" />
-                      </button>
-                    )}
-                  </div>
+              {!stream && !error && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <RefreshCw className="w-8 h-8 text-white/40 animate-spin" />
                 </div>
-              </section>
+              )}
 
-              {/* Recording Preview Section */}
-              <section className="bg-surface-container-lowest rounded-2xl p-6 shadow-[0_32px_32px_-12px_rgba(12,20,39,0.04)]">
-                <div className="flex justify-between items-center mb-6">
-                  <div className="flex items-center gap-3">
-                    <Camera className="w-5 h-5 text-on-surface-variant" />
-                    <h3 className="font-headline font-bold text-sm uppercase tracking-widest text-on-surface">Live Feed</h3>
-                  </div>
-                  <span className="text-[10px] font-mono text-on-surface-variant px-2 py-1 bg-surface-container-low rounded">
-                    {frameCount} FRAMES
-                  </span>
-                </div>
-                
-                <div className="aspect-video rounded-xl overflow-hidden bg-primary-container relative group">
-                  <div 
-                    className="w-full h-full touch-none"
-                    onWheel={(e) => {
-                      const newZoom = Math.min(Math.max(zoom - e.deltaY * 0.005, 1), 5);
-                      setZoom(newZoom);
-                    }}
-                    onTouchStart={(e) => {
-                      if (e.touches.length === 2) {
-                        const dist = Math.hypot(
-                          e.touches[0].clientX - e.touches[1].clientX,
-                          e.touches[0].clientY - e.touches[1].clientY
-                        );
-                        setPinchStartDist(dist);
-                        setPinchStartZoom(zoom);
-                      }
-                    }}
-                    onTouchMove={(e) => {
-                      if (e.touches.length === 2 && pinchStartDist !== null) {
-                        const dist = Math.hypot(
-                          e.touches[0].clientX - e.touches[1].clientX,
-                          e.touches[0].clientY - e.touches[1].clientY
-                        );
-                        const scale = dist / pinchStartDist;
-                        setZoom(Math.min(Math.max(pinchStartZoom * scale, 1), 5));
-                      }
-                    }}
-                    onTouchEnd={() => setPinchStartDist(null)}
-                  >
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                      style={{ transform: `scale(${zoom})`, transformOrigin: 'center' }}
-                      className={cn(
-                        "w-full h-full object-cover transition-opacity duration-300",
-                        videoUrl ? "opacity-0" : "opacity-100"
-                      )}
-                    />
-                    {videoUrl && (
-                      <video
-                        src={videoUrl}
-                        controls
-                        className="absolute inset-0 w-full h-full object-cover z-10"
-                      />
-                    )}
-                    
-                    <canvas ref={canvasRef} className="hidden" />
-
-                    {!stream && !error && (
-                      <div className="absolute inset-0 flex items-center justify-center text-surface-container-low/50">
-                        <RefreshCw className="w-8 h-8 animate-spin" />
-                      </div>
-                    )}
-                  </div>
-                  
-                  {isRecording && (
-                    <div className="absolute bottom-4 right-4 flex gap-2 z-20 pointer-events-none">
-                      <span className="px-2 py-1 bg-black/40 backdrop-blur-md rounded text-[9px] text-white uppercase tracking-widest">
-                        Capturing
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                {error && (
-                  <div className="mt-4 p-4 bg-error-container rounded-lg flex items-start gap-3 text-on-error-container">
-                    <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-                    <p className="text-sm font-medium">{error}</p>
-                  </div>
-                )}
-              </section>
-
-              {/* Output Actions */}
-              {videoUrl && !isRecording && (
-                <section className="bg-tertiary-container text-on-tertiary-container rounded-2xl p-6 flex items-center justify-between shadow-lg">
-                  <div>
-                    <p className="text-[10px] uppercase tracking-widest font-bold mb-1 text-tertiary-fixed">Compilation Complete</p>
-                    <p className="text-lg font-headline font-medium">Your timelapse is ready</p>
-                  </div>
-                  <div className="flex gap-3">
-                    <button
-                      onClick={() => setVideoUrl(null)}
-                      className="px-4 py-2 rounded-lg text-sm font-bold text-tertiary-fixed hover:bg-white/5 transition-colors"
-                    >
-                      Clear
-                    </button>
-                    <a
-                      href={videoUrl}
-                      download={`timelapse-${new Date().getTime()}.webm`}
-                      className="bg-tertiary-fixed text-on-tertiary-fixed px-6 py-2 rounded-lg text-sm font-bold flex items-center gap-2 hover:opacity-90 transition-opacity"
-                    >
-                      <Download className="w-4 h-4" />
-                      Download
-                    </a>
-                  </div>
-                </section>
+              {/* Creepy eye overlay when running */}
+              {sessionState === 'running' && (
+                 <div className="absolute top-4 right-4 text-white/50 animate-pulse">
+                    <Eye className="w-6 h-6" />
+                 </div>
               )}
             </div>
 
-            {/* Right Column: Settings */}
-            <div className="col-span-1 lg:col-span-4 space-y-8">
-              <div className="bg-surface-container-low rounded-3xl p-8 sticky top-28">
-                <div className="mb-10">
-                  <h3 className="text-xs font-bold font-headline uppercase tracking-[0.2em] text-on-surface mb-6 border-b border-outline-variant/10 pb-4">
-                    Architecture
-                  </h3>
-                  
-                  <div className="space-y-8">
-                    {/* Camera Select */}
-                    <div>
-                      <label className="block text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-3">
-                        Recording Device
-                      </label>
-                      <div className="relative">
-                        <select
-                          disabled={isRecording}
-                          value={selectedDeviceId}
-                          onChange={e => setSelectedDeviceId(e.target.value)}
-                          className="w-full bg-surface-container-highest border-none rounded-lg py-4 px-4 appearance-none focus:ring-2 focus:ring-tertiary-fixed font-headline text-primary text-sm disabled:opacity-50"
-                        >
-                          {devices.map(d => (
-                            <option key={d.deviceId} value={d.deviceId}>
-                              {d.label || `Camera ${d.deviceId.slice(0, 5)}`}
-                            </option>
-                          ))}
-                        </select>
-                        <Settings className="w-4 h-4 absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-on-surface-variant" />
-                      </div>
-                    </div>
+            {error && (
+              <div className="mt-4 p-3 bg-error-container rounded-xl flex items-start gap-2 text-on-error-container text-xs">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <p className="font-medium font-body leading-relaxed">{error}</p>
+              </div>
+            )}
+          </div>
 
-                    {/* Interval Slider */}
-                    <div>
-                      <div className="flex justify-between items-end mb-4">
-                        <label className="font-headline font-semibold text-primary">Capture Interval</label>
-                        <span className="text-2xl font-headline font-light text-primary tracking-tighter">
-                          {intervalMs >= 1000 ? intervalMs / 1000 : intervalMs} 
-                          <span className="text-xs font-bold text-on-surface-variant uppercase tracking-widest ml-1">
-                            {intervalMs >= 1000 ? 'sec' : 'ms'}
-                          </span>
-                        </span>
-                      </div>
-                      <input 
-                        type="range" 
-                        min="100" 
-                        max="10000" 
-                        step="100"
-                        value={intervalMs}
-                        onChange={(e) => setIntervalMs(Number(e.target.value))}
-                        disabled={isRecording}
-                        className="w-full h-1 bg-surface-container-high rounded-full appearance-none cursor-pointer custom-range disabled:opacity-50" 
-                      />
-                      <div className="flex justify-between mt-2 text-[10px] text-on-surface-variant font-bold uppercase tracking-widest">
-                        <span>Fast (0.1s)</span>
-                        <span>Slow (10s)</span>
-                      </div>
-                    </div>
-
-                    {/* FPS Slider */}
-                    <div>
-                      <div className="flex justify-between items-end mb-4">
-                        <label className="font-headline font-semibold text-primary">Output Framerate</label>
-                        <span className="text-2xl font-headline font-light text-primary tracking-tighter">
-                          {outputFps} <span className="text-xs font-bold text-on-surface-variant uppercase tracking-widest ml-1">fps</span>
-                        </span>
-                      </div>
-                      <input 
-                        type="range" 
-                        min="24" 
-                        max="60" 
-                        step="1"
-                        value={outputFps}
-                        onChange={(e) => setOutputFps(Number(e.target.value))}
-                        disabled={isRecording}
-                        className="w-full h-1 bg-surface-container-high rounded-full appearance-none cursor-pointer custom-range disabled:opacity-50" 
-                      />
-                      <div className="flex justify-between mt-2 text-[10px] text-on-surface-variant font-bold uppercase tracking-widest">
-                        <span>Cinematic (24)</span>
-                        <span>Smooth (60)</span>
-                      </div>
-                    </div>
-
-                    {/* Zoom Slider */}
-                    <div>
-                      <div className="flex justify-between items-end mb-4">
-                        <label className="font-headline font-semibold text-primary">Digital Zoom</label>
-                        <span className="text-2xl font-headline font-light text-primary tracking-tighter">
-                          {zoom.toFixed(1)}<span className="text-xs font-bold text-on-surface-variant uppercase tracking-widest ml-1">x</span>
-                        </span>
-                      </div>
-                      <input 
-                        type="range" 
-                        min="1" 
-                        max="5" 
-                        step="0.1"
-                        value={zoom}
-                        onChange={(e) => setZoom(parseFloat(e.target.value))}
-                        className="w-full h-1 bg-surface-container-high rounded-full appearance-none cursor-pointer custom-range" 
-                      />
-                      <div className="flex justify-between mt-2 text-[10px] text-on-surface-variant font-bold uppercase tracking-widest">
-                        <span>1x</span>
-                        <span>5x</span>
-                      </div>
-                    </div>
-
-                  </div>
-                </div>
-
-                <div className="bg-surface-container-lowest p-6 rounded-2xl border border-outline-variant/10">
-                  <p className="text-xs italic text-on-surface-variant leading-relaxed">
-                    "The shorter way to do many things is to only do one thing at a time."
-                  </p>
-                  <p className="text-[10px] font-bold uppercase mt-4 tracking-widest text-primary">— Mozart</p>
-                </div>
+          {/* Settings Section */}
+          <div className="bg-surface-container-low p-6 rounded-3xl opacity-80 hover:opacity-100 transition-opacity">
+            <h3 className="text-[10px] font-black font-headline uppercase tracking-[0.2em] text-on-surface-variant mb-4">
+              Hardware Setup
+            </h3>
+            
+            <div>
+              <label className="block text-[10px] font-bold text-on-surface-variant uppercase tracking-widest mb-2">
+                Camera Input
+              </label>
+              <div className="relative">
+                <select
+                  disabled={sessionState === 'running'}
+                  value={selectedDeviceId}
+                  onChange={e => setSelectedDeviceId(e.target.value)}
+                  className="w-full bg-surface-container-highest border-none rounded-xl py-3 px-4 appearance-none focus:ring-2 focus:ring-primary font-headline text-on-surface text-sm disabled:opacity-50 transition-all shadow-inner"
+                >
+                  {devices.map(d => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label || `Camera ${d.deviceId.slice(0, 5)}`}
+                    </option>
+                  ))}
+                </select>
+                <Settings className="w-4 h-4 absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-on-surface-variant" />
               </div>
             </div>
-
           </div>
+          
         </div>
-        
-        {/* SEO Footer */}
-        <footer className="border-t border-outline-variant/10 bg-surface-container-lowest py-8 mt-auto">
-          <div className="max-w-7xl mx-auto px-6 md:px-12 text-center space-y-4">
-            <h2 className="text-lg font-headline font-semibold text-on-surface">Free Online Timelapse Maker</h2>
-            <p className="text-sm text-on-surface-variant max-w-3xl mx-auto leading-relaxed">
-              Use our free online timelapse recorder to capture stunning webcam timelapses directly in your browser. 
-              No software installation, no watermarks, and completely secure—all processing happens locally on your device 
-              using advanced WebCodecs technology. Perfect for 3D printing monitoring, studying, nature observation, and creative projects.
-            </p>
-            <div className="flex justify-center gap-4 text-xs text-on-surface-variant/60 pt-4 font-bold uppercase tracking-widest">
-              <span>&copy; {new Date().getFullYear()} Timelapse Recorder</span>
-              <span>•</span>
-              <span>Browser-Based</span>
-              <span>•</span>
-              <span>Privacy First</span>
-            </div>
-          </div>
-        </footer>
       </main>
     </div>
   );
